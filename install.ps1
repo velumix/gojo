@@ -15,7 +15,7 @@ $shortcut.WorkingDirectory = $projectDir
 $shortcut.WindowStyle = 7
 $shortcut.Save()
 
-Start-Process -FilePath $binaryPath -WorkingDirectory $projectDir -WindowStyle Hidden
+Start-Process -FilePath $binaryPath -ArgumentList '--watch' -WorkingDirectory $projectDir -WindowStyle Hidden
 
 Write-Host "Installed Gojo startup shortcut: $shortcutPath"
 Write-Host "Gojo is running now and will also start when you sign in."
