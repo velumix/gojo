@@ -1,0 +1,29 @@
+GOJO - GETTING STARTED
+
+Gojo runs quietly in the background. It does not have a main window.
+
+1. Open Roblox Studio.
+2. In your MCP client, add a server named Gojo and set its command to the
+   full path of gojo.exe in your Gojo installation folder.
+3. Restart the MCP client. Gojo will expose Roblox Studio's MCP tools and
+   the pull_roblox_scripts tool.
+
+Example MCP client configuration:
+
+{
+  "mcpServers": {
+    "Gojo": {
+      "command": "C:\\Users\\YOUR_NAME\\AppData\\Local\\Programs\\Gojo\\gojo.exe"
+    }
+  }
+}
+
+Replace YOUR_NAME with your Windows user name. If you chose a different
+installation folder, use that path instead. The installer also displays the
+exact command path for copying.
+
+The optional watcher starts when you sign in and connects to Roblox Studio
+when it opens. Gojo writes its log to %LOCALAPPDATA%\Gojo\gojo.log.
+
+To remove Gojo, open Windows Settings > Apps > Installed apps and uninstall
+Gojo. You can also use the Uninstall Gojo shortcut in the Start menu.

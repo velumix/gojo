@@ -20,7 +20,7 @@ Point your MCP client at `gojo.exe`:
 {
   "mcpServers": {
     "Gojo": {
-      "command": "C:\\Users\\TheRe\\Desktop\\Gojo\\gojo.exe"
+      "command": "C:\\Users\\TheRe\\AppData\\Local\\Programs\\Gojo\\gojo.exe"
     }
   }
 }
@@ -50,11 +50,51 @@ project with `place.json` and mapped `.luau` files under `src/`.
 is open, provide `studio_id` to choose the target. The pull tool is implemented
 inside Gojo and does not depend on Abraxius.
 
+The same pull runs from the command line without an MCP client:
+
+```powershell
+gojo --pull "C:\path\to\project"
+gojo --pull ./roblox-place --services ReplicatedStorage,ServerScriptService --max-depth 25
+gojo --pull ./roblox-place --studio "Sun City RP"
+gojo --help
+```
+
+Instance names containing dots (for example `haedrix_react@17.3.10`) stay a
+single folder, and same-name siblings of different classes (a `Script` and a
+`LocalScript` both named `Boot`) are both written. If two Studio paths would
+map to one file (a child named `init`), the pull keeps the parent file and reports the collision count instead of silently overwriting.
+
 The Go code is split into child packages under `internal/`: MCP transport and
 proxying, Studio banner, Windows process helpers, supervision, logging, and
 script pulling.
 
-## Install automatic startup
+## Windows installer
+
+Download and run `Gojo-Setup-<version>-win64.exe`. The installer puts Gojo in
+`%LOCALAPPDATA%\Programs\Gojo`, registers it in Windows Installed Apps, and
+offers a per-user startup shortcut for the watcher. It displays the exact
+`gojo.exe` path to copy into an MCP client, installs a Getting Started guide
+and Start menu shortcuts, and can open the guide after setup. Administrator
+access is not required. Uninstall it from Windows Installed Apps or the Start
+menu. The uninstall process stops the installed Gojo process before removing
+its files. The installer does not configure an MCP client automatically.
+
+To build the installer, install Go 1.22 or newer and Inno Setup 6, then run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-installer.ps1 -Version 0.1.0
+```
+
+The installer is written to `dist\Gojo-Setup-0.1.0-win64.exe`.
+The executable and installer use `assets\gojo.ico`. To regenerate it from a
+replacement PNG and update the executable resource, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\convert-icon.ps1
+go run github.com/akavel/rsrc@v0.10.2 -ico assets\gojo.ico -o rsrc_windows_amd64.syso
+```
+
+## Install automatic startup from source
 
 Run PowerShell from this directory:
 

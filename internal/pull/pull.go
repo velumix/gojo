@@ -39,6 +39,7 @@ var DefaultServices = []string{
 	"Teams",
 	"Chat",
 	"TextChatService",
+	"TestService",
 }
 
 type SessionFactory func() (protocol.ToolCaller, io.Closer, error)
@@ -62,17 +63,29 @@ type Result struct {
 	Skipped    int
 	Failed     int
 	Chunks     int
+	Collisions int
 }
 
+// Path holds one DataModel name per segment. Names may contain dots
+// (for example "haedrix_react@17.3.10"), so segments stay separate end to
+// end instead of a dotted string that cannot be split back safely.
 type scriptFile struct {
-	ClassName    string `json:"className"`
-	Path         string `json:"path"`
-	Source       string `json:"source"`
-	HasChildren  bool   `json:"hasChildren"`
-	SourceOffset int    `json:"sourceOffset"`
-	SourceLength int    `json:"sourceLength"`
-	Complete     bool   `json:"complete"`
-	Encoding     string `json:"encoding"`
+	ClassName    string   `json:"className"`
+	Path         []string `json:"path"`
+	Source       string   `json:"source"`
+	HasChildren  bool     `json:"hasChildren"`
+	SourceOffset int      `json:"sourceOffset"`
+	SourceLength int      `json:"sourceLength"`
+	Complete     bool     `json:"complete"`
+	Encoding     string   `json:"encoding"`
+}
+
+func (f scriptFile) displayPath() string {
+	return strings.Join(f.Path, ".")
+}
+
+func (f scriptFile) key() string {
+	return strings.Join(f.Path, "\x00") + "\x00" + f.ClassName
 }
 
 type bulkResponse struct {
@@ -160,7 +173,7 @@ func (t *Tool) Call(name string, arguments map[string]any) (protocol.ToolResult,
 	if err != nil {
 		return protocol.ToolResult{}, err
 	}
-	return protocol.TextResult(formatResult(result), false), nil
+	return protocol.TextResult(FormatResult(result), false), nil
 }
 
 func Pull(caller protocol.ToolCaller, options Options) (Result, error) {
@@ -170,8 +183,8 @@ func Pull(caller protocol.ToolCaller, options Options) (Result, error) {
 	if options.MaxDepth == 0 {
 		options.MaxDepth = 10
 	}
-	if options.MaxDepth < 1 || options.MaxDepth > 10 {
-		return Result{}, fmt.Errorf("max_depth must be between 1 and 10")
+	if options.MaxDepth < 1 || options.MaxDepth > 25 {
+		return Result{}, fmt.Errorf("max_depth must be between 1 and 25")
 	}
 	if len(options.Services) == 0 {
 		options.Services = append([]string(nil), DefaultServices...)
@@ -205,11 +218,10 @@ func Pull(caller protocol.ToolCaller, options Options) (Result, error) {
 		result.Chunks++
 		for _, file := range chunk.Scripts {
 			if err := decodeSource(&file); err != nil {
-				return Result{}, fmt.Errorf("decode source %s: %w", file.Path, err)
+				return Result{}, fmt.Errorf("decode source %s: %w", file.displayPath(), err)
 			}
-			file.Path = normalizePath(file.Path)
-			if file.Path != "" && scriptExtension(file.ClassName) != "" {
-				filesByPath[file.Path] = file
+			if len(file.Path) > 0 && scriptExtension(file.ClassName) != "" {
+				filesByPath[file.key()] = file
 			} else {
 				result.Skipped++
 			}
@@ -228,20 +240,30 @@ func Pull(caller protocol.ToolCaller, options Options) (Result, error) {
 	for _, file := range filesByPath {
 		files = append(files, file)
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	sort.Slice(files, func(i, j int) bool { return files[i].displayPath() < files[j].displayPath() })
 
 	tree := map[string]any{"$className": "DataModel"}
+	seenLocal := make(map[string]string)
+	var collisionDetail string
 	for _, file := range files {
 		service, localPath, err := localScriptPath(outputDir, file)
 		if err != nil {
 			result.Skipped++
 			continue
 		}
+		if previous, exists := seenLocal[localPath]; exists && previous != file.displayPath() {
+			result.Collisions++
+			if collisionDetail == "" {
+				collisionDetail = fmt.Sprintf("%s and %s both map to %s", previous, file.displayPath(), localPath)
+			}
+			continue
+		}
+		seenLocal[localPath] = file.displayPath()
 		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
-			return Result{}, fmt.Errorf("create %s directory: %w", file.Path, err)
+			return Result{}, fmt.Errorf("create %s directory: %w", file.displayPath(), err)
 		}
 		if err := os.WriteFile(localPath, []byte(file.Source), 0o644); err != nil {
-			return Result{}, fmt.Errorf("write %s: %w", file.Path, err)
+			return Result{}, fmt.Errorf("write %s: %w", file.displayPath(), err)
 		}
 		tree[service] = map[string]any{
 			"$path": filepath.ToSlash(filepath.Join("src", service)),
@@ -252,6 +274,10 @@ func Pull(caller protocol.ToolCaller, options Options) (Result, error) {
 	if err := writeProject(outputDir, tree); err != nil {
 		return Result{}, err
 	}
+	// Collisions (a child ModuleScript named "init" under a script that
+	// itself maps to init.luau) keep the parent file and are reported in
+	// the result instead of failing an otherwise complete pull.
+	_ = collisionDetail
 	return result, nil
 }
 
@@ -279,39 +305,39 @@ func readBulkChunk(caller protocol.ToolCaller, studioID string, services []strin
 }
 
 func completeSources(caller protocol.ToolCaller, studioID string, files map[string]scriptFile) error {
-	for path, file := range files {
+	for key, file := range files {
 		if file.Complete {
 			continue
 		}
 		if file.SourceLength < len(file.Source) {
-			return fmt.Errorf("source length mismatch for %s", path)
+			return fmt.Errorf("source length mismatch for %s", file.displayPath())
 		}
 		for len(file.Source) < file.SourceLength {
-			chunk, err := readSourceChunk(caller, studioID, path, len(file.Source))
+			chunk, err := readSourceChunk(caller, studioID, file, len(file.Source))
 			if err != nil {
-				return fmt.Errorf("read remaining source for %s: %w", path, err)
+				return fmt.Errorf("read remaining source for %s: %w", file.displayPath(), err)
 			}
 			if len(chunk.Scripts) != 1 {
-				return fmt.Errorf("source chunk for %s was empty", path)
+				return fmt.Errorf("source chunk for %s was empty", file.displayPath())
 			}
 			next := chunk.Scripts[0]
 			if err := decodeSource(&next); err != nil {
-				return fmt.Errorf("decode source chunk for %s: %w", path, err)
+				return fmt.Errorf("decode source chunk for %s: %w", file.displayPath(), err)
 			}
 			if next.SourceOffset != len(file.Source) || len(next.Source) == 0 {
-				return fmt.Errorf("source chunk for %s was out of order", path)
+				return fmt.Errorf("source chunk for %s was out of order", file.displayPath())
 			}
 			file.Source += next.Source
 			file.Complete = next.Complete || len(file.Source) >= file.SourceLength
 		}
-		files[path] = file
+		files[key] = file
 	}
 	return nil
 }
 
-func readSourceChunk(caller protocol.ToolCaller, studioID, path string, offset int) (bulkResponse, error) {
+func readSourceChunk(caller protocol.ToolCaller, studioID string, file scriptFile, offset int) (bulkResponse, error) {
 	response, err := callWithRetry(caller, "execute_luau", map[string]any{
-		"code":           sourceChunkCode(path, offset, sourceChunkSize),
+		"code":           sourceChunkCode(file.Path, file.ClassName, offset, sourceChunkSize),
 		"datamodel_type": "Edit",
 		"studio_id":      studioID,
 	})
@@ -368,7 +394,7 @@ local function pathOf(instance)
 		table.insert(parts, 1, cursor.Name)
 		cursor = cursor.Parent
 	end
-	return table.concat(parts, ".")
+	return parts
 end
 
 local hexDigits = "0123456789abcdef"
@@ -395,7 +421,7 @@ for _, instance in ipairs(game:GetDescendants()) do
 				sourceChunk = string.sub(source, 1, maxSourceSize)
 				complete = false
 			end
-			local estimatedSize = (#sourceChunk * 3) + (#path * 2) + 256
+			local estimatedSize = (#sourceChunk * 3) + (#table.concat(path, ".") * 2) + 256
 			if #scripts > 0 and payloadSize + estimatedSize > maxPayloadSize then
 				collecting = false
 			else
@@ -422,10 +448,12 @@ return HttpService:JSONEncode({
 })`, string(servicesJSON), offset, limit, maxDepth, maxPayloadSize, sourceChunkSize)
 }
 
-func sourceChunkCode(path string, offset, limit int) string {
+func sourceChunkCode(path []string, className string, offset, limit int) string {
 	pathJSON, _ := json.Marshal(path)
+	classJSON, _ := json.Marshal(className)
 	return fmt.Sprintf(`local HttpService = game:GetService("HttpService")
 local requestedPath = HttpService:JSONDecode(%q)
+local requestedClass = HttpService:JSONDecode(%q)
 local offset = %d
 local limit = %d
 
@@ -436,7 +464,19 @@ local function pathOf(instance)
 		table.insert(parts, 1, cursor.Name)
 		cursor = cursor.Parent
 	end
-	return table.concat(parts, ".")
+	return parts
+end
+
+local function samePath(left, right)
+	if #left ~= #right then
+		return false
+	end
+	for index = 1, #left do
+		if left[index] ~= right[index] then
+			return false
+		end
+	end
+	return true
 end
 
 local hexDigits = "0123456789abcdef"
@@ -452,7 +492,7 @@ local function hexEncode(value)
 end
 
 for _, instance in ipairs(game:GetDescendants()) do
-	if instance:IsA("LuaSourceContainer") and pathOf(instance) == requestedPath then
+	if instance:IsA("LuaSourceContainer") and instance.ClassName == requestedClass and samePath(pathOf(instance), requestedPath) then
 		local source = instance.Source
 		local finish = math.min(#source, offset + limit)
 		local chunk = string.sub(source, offset + 1, finish)
@@ -477,7 +517,7 @@ return HttpService:JSONEncode({
 	total = 0,
 	offset = 0,
 	scripts = {},
-})`, string(pathJSON), offset, limit)
+})`, string(pathJSON), string(classJSON), offset, limit)
 }
 
 func parseBulkResponse(result protocol.ToolResult) (bulkResponse, error) {
@@ -563,15 +603,18 @@ func numberValue(value any) (int, error) {
 }
 
 func resolveStudio(caller protocol.ToolCaller, requestedID string) (string, string, error) {
-	if requestedID != "" {
-		return requestedID, requestedID, nil
-	}
 	result, err := callWithRetry(caller, "list_roblox_studios", map[string]any{})
 	if err != nil {
+		if requestedID != "" {
+			return requestedID, requestedID, nil
+		}
 		return "", "", fmt.Errorf("list Studios: %w", err)
 	}
 	text, err := firstText(result)
 	if err != nil {
+		if requestedID != "" {
+			return requestedID, requestedID, nil
+		}
 		return "", "", err
 	}
 	var listing struct {
@@ -581,10 +624,24 @@ func resolveStudio(caller protocol.ToolCaller, requestedID string) (string, stri
 		} `json:"studios"`
 	}
 	if err := json.Unmarshal([]byte(text), &listing); err != nil {
+		if requestedID != "" {
+			return requestedID, requestedID, nil
+		}
 		return "", "", fmt.Errorf("parse Studios: %w", err)
 	}
 	if len(listing.Studios) == 0 {
 		return "", "", fmt.Errorf("no connected Roblox Studio instances")
+	}
+	if requestedID != "" {
+		for _, s := range listing.Studios {
+			if s.ID == requestedID || strings.EqualFold(s.ID, requestedID) {
+				return s.ID, s.Name, nil
+			}
+			if strings.Contains(strings.ToLower(s.Name), strings.ToLower(requestedID)) {
+				return s.ID, s.Name, nil
+			}
+		}
+		return requestedID, requestedID, nil
 	}
 	if len(listing.Studios) > 1 {
 		return "", "", fmt.Errorf("studio_id is required when multiple Studios are connected")
@@ -608,9 +665,9 @@ func callWithRetry(caller protocol.ToolCaller, name string, arguments map[string
 }
 
 func localScriptPath(outputDir string, file scriptFile) (string, string, error) {
-	parts := strings.Split(normalizePath(file.Path), ".")
+	parts := file.Path
 	if len(parts) < 2 {
-		return "", "", fmt.Errorf("invalid script path %q", file.Path)
+		return "", "", fmt.Errorf("invalid script path %q", file.displayPath())
 	}
 	service := sanitizeName(parts[0])
 	name := sanitizeName(parts[len(parts)-1])
@@ -652,10 +709,6 @@ func sanitizeName(value string) string {
 	return value
 }
 
-func normalizePath(value string) string {
-	return strings.TrimPrefix(strings.TrimSpace(value), "game.")
-}
-
 func firstText(result protocol.ToolResult) (string, error) {
 	for _, content := range result.Content {
 		if content.Type == "text" && content.Text != "" {
@@ -683,10 +736,10 @@ func writeProject(outputDir string, tree map[string]any) error {
 	return nil
 }
 
-func formatResult(result Result) string {
+func FormatResult(result Result) string {
 	message := fmt.Sprintf("Pulled %d scripts from %s into %s in %d bulk chunks", result.Scripts, result.StudioName, result.OutputDir, result.Chunks)
-	if result.Skipped > 0 || result.Failed > 0 {
-		message += fmt.Sprintf(" (%d skipped, %d failed)", result.Skipped, result.Failed)
+	if result.Skipped > 0 || result.Failed > 0 || result.Collisions > 0 {
+		message += fmt.Sprintf(" (%d skipped, %d failed, %d collisions)", result.Skipped, result.Failed, result.Collisions)
 	}
 	return message
 }

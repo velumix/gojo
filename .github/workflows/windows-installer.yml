@@ -1,0 +1,36 @@
+name: Windows installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version shown by the installer
+        required: true
+        default: 0.1.0
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+      - name: Build installer
+        shell: pwsh
+        env:
+          INSTALLER_VERSION: ${{ github.event.inputs.version || github.ref_name }}
+        run: |
+          $version = $env:INSTALLER_VERSION -replace '^v', ''
+          .\build-installer.ps1 -Version $version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gojo-windows-installer
+          path: dist/Gojo-Setup-*-win64.exe
+          if-no-files-found: error

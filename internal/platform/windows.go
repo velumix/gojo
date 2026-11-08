@@ -1,11 +1,30 @@
 package platform
 
 import (
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
 )
+
+// AttachParentConsole attaches to the parent terminal so a windowsgui
+// build can still print help and pull output. No-op without a parent
+// console (for example when an MCP host pipes stdio).
+func AttachParentConsole() {
+	proc := syscall.NewLazyDLL("kernel32.dll").NewProc("AttachConsole")
+	r, _, _ := proc.Call(^uintptr(0) /* ATTACH_PARENT_PROCESS */)
+	if r == 0 {
+		return
+	}
+	if out, err := os.OpenFile("CONOUT$", os.O_WRONLY, 0); err == nil {
+		os.Stdout = out
+		os.Stderr = out
+	}
+	if in, err := os.OpenFile("CONIN$", os.O_RDONLY, 0); err == nil {
+		os.Stdin = in
+	}
+}
 
 func HiddenCommand(name string, args ...string) *exec.Cmd {
 	cmd := exec.Command(name, args...)
